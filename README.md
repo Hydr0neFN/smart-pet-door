@@ -26,7 +26,9 @@ Built on an **ESP32-C6** with dual mmWave radar presence detection, a Time-of-Fl
 
 ## How It Works
 
-Two **LD2450 24 GHz mmWave radars** watch each side of the threshold (indoor + outdoor). When one detects a target approaching, the controller swings the door open. Once the radar field is clear for a hold delay, the door closes. A downward-facing **VL53L1X ToF sensor** at the gate acts as an invisible safety curtain — any obstruction detected during closing reverses the door (anti-pinch).
+A pair of **24 GHz mmWave radars** — one **LD2450** and one **LD2410** — watch each side of the threshold (indoor + outdoor). When one detects a target approaching, the controller swings the door open. Once the radar field is clear for a hold delay, the door closes. A downward-facing **VL53L1X ToF sensor** at the gate acts as an invisible safety curtain — any obstruction detected during closing reverses the door (anti-pinch).
+
+> The design called for two LD2450s, but one arrived dead, so the build pairs one LD2450 (multi-target, direction-aware) with one LD2410 (presence-only). Note that the firmware's radar parser currently decodes the **LD2450** frame format only (`AA FF 03 00 … 55 CC`); the LD2410 speaks a different UART protocol and needs its own parser before that channel reports presence.
 
 The firmware runs a four-state machine:
 
@@ -46,7 +48,7 @@ Two NEMA 17 motors are mounted **back-to-back** at the hinge and driven in mirro
 ## Features
 
 - **Silent actuation** — TMC2130 StealthChop eliminates the audible whine of A4988/DRV8825-class drivers.
-- **Presence detection, not contact** — 24 GHz FMCW radar detects an approaching animal at a distance; multi-target tracking can distinguish direction of travel.
+- **Presence detection, not contact** — 24 GHz FMCW radar detects an approaching animal at a distance; the LD2450's multi-target tracking can distinguish direction of travel (the LD2410 reports presence only).
 - **Pre-emptive anti-pinch** — ToF curtain halts and reverses the door *before* contact, not after.
 - **Secure at rest** — backdrivable drivetrain held closed by motor torque; resists being shoved open.
 - **Dual-radar, selectable trigger** — inside-only, outside-only, or a radar-free timed test cycle, set at compile time.
@@ -59,7 +61,7 @@ Two NEMA 17 motors are mounted **back-to-back** at the hinge and driven in mirro
 | MCU | **ESP32-C6** DevKitM-1 | RISC-V, Wi-Fi 6, BLE 5, 802.15.4 (Zigbee/Thread), Matter-ready |
 | Motor driver | **TMC2130** ×2 | StealthChop (silent), StallGuard, SPI config, 1/256 µstep |
 | Motor | **NEMA 17** ×2 | 1.8°/step, 0.3–0.6 Nm, direct hinge drive, back-to-back mount |
-| Presence | **LD2450** mmWave radar ×2 | 24 GHz FMCW, UART @ 256000 baud, ~5 m range, one per side |
+| Presence | **LD2450** ×1 + **LD2410** ×1 | 24 GHz FMCW, UART, ~5 m, one per side. LD2410 substituted after an LD2450 arrived dead; LD2450 does multi-target/direction, LD2410 presence-only |
 | Safety | **VL53L1X** ToF ×1 | I²C, 940 nm (no radar interference), downward gate mount |
 | Power | 12 V SMPS → **LM2596** buck → 5 V | 12 V to drivers, 5 V to MCU + sensors; 1000 µF back-EMF caps per driver |
 | Panel | Steel-faced **20 mm PIR foam** + rubber gasket | R ≈ 0.87 m²·K/W; overlapping bi-parting panels with perimeter seal |
@@ -79,8 +81,8 @@ As wired in [`src/main.cpp`](src/main.cpp) for the ESP32-C6:
 | Driver 1 STEP / DIR / CS | 11 / 10 / 18 | SPI/step | Motor driver 1 |
 | Driver 2 STEP / DIR / CS | 23 / 22 / 3 | SPI/step | Motor driver 2 |
 | ToF SDA / SCL | 6 / 7 | I²C | VL53L1X |
-| Radar 1 (inside) RX / TX | 17 / 16 | UART0 | LD2450 #1 |
-| Radar 2 (outside) RX / TX | 4 / 5 | UART1 | LD2450 #2 |
+| Radar 1 (inside) RX / TX | 17 / 16 | UART0 | mmWave radar #1 |
+| Radar 2 (outside) RX / TX | 4 / 5 | UART1 | mmWave radar #2 |
 | Door switch (reserved) | 1 | — | Disabled until wired (`USE_DOOR_SWITCH 0`) |
 
 > The ESP32-C6 console runs over USB-Serial-JTAG (HWCDC), leaving both hardware UARTs free for the two radars. The door-position switch is reserved on GPIO1 but not yet on the PCB; without it the firmware assumes "shut" at boot (`pos = 0`).
@@ -137,7 +139,7 @@ The design specifies three tiers of obstruction protection; tiers 1–2 are pre-
 | Tier | Sensor | Method | Status |
 |---|---|---|---|
 | 1 | VL53L1X ToF | Distance poll during close → reverse | ✅ Implemented (anti-pinch reopen) |
-| 2 | LD2450 mmWave | Presence-hold keeps door open while occupied | ✅ Implemented |
+| 2 | mmWave radar | Presence-hold keeps door open while occupied | ✅ Implemented |
 | 3 | TMC2130 StallGuard | Back-EMF stall readback over SPI | 🔧 Prototyped in `main.old`, not on current PCB |
 
 ## Access Modes & Connectivity (design target)
@@ -155,6 +157,7 @@ Planned Zigbee surface: a **Door Lock** cluster for mode commands and an **Occup
 
 ## Roadmap
 
+- [ ] Add an LD2410 frame parser for the second radar channel (currently both channels are decoded as LD2450)
 - [ ] Direction-of-travel inference from LD2450 target coordinates
 - [ ] UNLOCKED / IN-ONLY / OUT-ONLY / LOCKED access-mode enforcement
 - [ ] Zigbee join + Door Lock & Occupancy Sensing clusters
