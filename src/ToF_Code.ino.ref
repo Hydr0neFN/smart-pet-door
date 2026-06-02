@@ -1,0 +1,52 @@
+#include <Wire.h>
+#include "Adafruit_VL53L1X.h"
+
+#define I2C_SDA 19
+#define I2C_SCL 18
+
+// We are putting -1 here to completely disable the interrupt and shutdown pins in the code
+Adafruit_VL53L1X vl53 = Adafruit_VL53L1X(-1, -1); 
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial) delay(10);
+
+  Wire.begin(I2C_SDA, I2C_SCL);
+
+  if (!vl53.begin(0x29, &Wire)) {
+    Serial.println("Error initializing VL53L1X. Check your wiring!");
+    while (1) delay(10);
+  }
+  
+  vl53.startRanging();
+  vl53.setTimingBudget(50);
+  
+  // Force a clear just in case it was stuck from the last crash
+  vl53.clearInterrupt(); 
+  
+  Serial.println("Sensor initialized in POLLING MODE.");
+  Serial.println("-----------------------------------");
+}
+
+void loop() {
+  // Constantly poll the sensor to see if data is ready
+  if (vl53.dataReady()) {
+    int16_t distance = vl53.distance();
+    
+    if (distance != -1) {
+      Serial.print("Current Distance: ");
+      Serial.print(distance);
+      Serial.print(" mm");
+      
+      // Upgraded logic: Ignores the <40mm blindspot to prevent ghost readings!
+      if (distance > 40 && distance < 350) {
+         Serial.println("   <-- ⚠️ OBJECT DETECTED!");
+      } else {
+         Serial.println(); 
+      }
+    }
+    
+    // Clear the sensor's internal memory so it instantly takes the next reading
+    vl53.clearInterrupt();
+  }
+}
