@@ -536,7 +536,7 @@ static bool petUpdate(bool inP, bool outP, bool blocked, uint32_t now) {
   int16_t before = pets.inside;
   switch (pets.state) {
     case PASS_IDLE:
-      if (now < pets.cooldownUntil) break;
+      if ((int32_t)(now - pets.cooldownUntil) < 0) break;   // wrap-safe cooldown
       if      (outP && !inP) { pets.dir = DIR_IN;  pets.state = PASS_ARMED; pets.tMark = now; }
       else if (inP && !outP) { pets.dir = DIR_OUT; pets.state = PASS_ARMED; pets.tMark = now; }
       break;
@@ -550,8 +550,12 @@ static bool petUpdate(bool inP, bool outP, bool blocked, uint32_t now) {
       if (!blocked) {
         bool farSeen = (pets.dir == DIR_IN) ? inP : outP;
         if (farSeen)                                   petCommit(now);
-        else if (now - pets.tMark > PASS_CROSS_TIMEOUT) petReset();   // backed out
-      } else if (now - pets.tMark > PASS_STUCK_TIMEOUT) petReset();   // lingering
+        else if (now - pets.tMark > PASS_CROSS_TIMEOUT) {             // backed out same side
+          pets.cooldownUntil = now + PASS_COOLDOWN_MS; petReset();
+        }
+      } else if (now - pets.tMark > PASS_STUCK_TIMEOUT) {            // lingering in beam
+        pets.cooldownUntil = now + PASS_COOLDOWN_MS; petReset();
+      }
       break;
   }
   return pets.inside != before;
@@ -685,10 +689,11 @@ void zigbeePublish() {
     zbPetCount.setAnalogInput((float)pets.inside);
     zbPetCount.reportAnalogInput();
   }
-  if (doorMode != lastMode) {
-    lastMode = doorMode;
-    zbLock.publishLocked(doorMode == MODE_LOCKED);
-    zbMode.setMultistateOutput(doorMode);
+  DoorMode m = doorMode;             // cache once: zboss task may mutate mid-publish
+  if (m != lastMode) {
+    lastMode = m;
+    zbLock.publishLocked(m == MODE_LOCKED);
+    zbMode.setMultistateOutput(m);
     zbMode.reportMultistateOutput();
   }
 }
@@ -736,6 +741,7 @@ void setup() {
 #if RADIO_USES_WIFI
   led(0, 0, 40);                     // blue: Wi-Fi connecting
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);        // keep telnet log path alive across drops
   WiFi.setHostname("petdoor");
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   uint32_t t0 = millis();
@@ -843,7 +849,7 @@ void loop() {
   bool wantOpen = false;
 #else
   bool wantOpen = openRequested(inP, outP);
-  if (inP || outP) lastPresentMs = now;
+  if (wantOpen) lastPresentMs = now;   // hold open only while a mode-permitted side is present
 #endif
 
   switch (state) {
@@ -861,6 +867,9 @@ void loop() {
       break;
 
     case OPENING:
+#if !TEST_TIMED_CYCLE
+      if (doorMode == MODE_LOCKED) { doorMoveTo(0); setState(CLOSING); break; }
+#endif
       if (doorAtTarget()) setState(OPEN);
       break;
 
@@ -879,9 +888,10 @@ void loop() {
       break;
 
     case CLOSING:
-      if (obstructed()) {                                  // anti-pinch: reopen
+      if (block) {                                         // anti-pinch: reopen
         led(80, 0, 0);
         Log.println("ToF obstruction -> reopen");
+        lastPresentMs = now;                               // fresh dwell after reopen
         doorMoveTo(OPEN_STEPS); setState(OPENING);
         break;
       }
