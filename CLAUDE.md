@@ -69,8 +69,9 @@ This file captures the non-obvious constraints; the README is the human-facing o
   `core.logAllRefUpdates=false` + `windows.appendAtomically=false` and deleting `.git/logs`.
   Real fix: move the repo out of OneDrive.
 - **SSH to github.com is MITM-intercepted on this network** (banner `SSH-2.0-6279353`, KEX
-  failure) on ports 22 and 443 — host key cannot be trusted. Push over **HTTPS** instead.
-  `origin` is still the SSH URL, so SSH pushes keep failing here.
+  failure) on ports 22 and 443 — host key cannot be trusted. **Resolved:** `origin` switched
+  to the HTTPS URL, so plain `git push` works (creds via Git Credential Manager). Keep it HTTPS
+  while on this network; SSH may work elsewhere.
 
 ## Verification limits
 
