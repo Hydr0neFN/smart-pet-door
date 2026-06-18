@@ -12,7 +12,8 @@
 //  end-stop switch (independently enable-able) used as the closed ground truth.
 //
 //  Smart-home control (build env "deploy-zigbee" / "debug-both") exposes:
-//    - Door Lock cluster      : operating mode UNLOCKED / IN-ONLY / OUT-ONLY / LOCKED
+//    - Door Lock cluster      : security lock surface (LOCKED vs unlocked)
+//    - Multistate Output      : 4-way access mode UNLOCKED / IN-ONLY / OUT-ONLY / LOCKED
 //    - Occupancy Sensing      : occupied flag (pet present inside)
 //    - Analog Input cluster   : live pet count (pets currently inside)
 //
@@ -557,42 +558,36 @@ static bool petUpdate(bool inP, bool outP, bool blocked, uint32_t now) {
 }
 
 // ===========================================================================
-//  Zigbee — Door Lock (custom EP) + Occupancy + Analog pet count
+//  Zigbee — Door Lock (security) + Multistate mode select + Occupancy + count
+// ---------------------------------------------------------------------------
+//  The device advertises as a Door Lock (security device class): the standard
+//  Door Lock cluster carries the binary LockState (LOCKED vs not). The full
+//  4-way access mode rides a standard Multistate Output cluster, which generic
+//  hubs (ZHA / Zigbee2MQTT) expose natively as a writable select — no custom
+//  converter/quirk needed. Both surfaces are kept coherent with doorMode.
+//    Multistate index: 0=UNLOCKED 1=IN-ONLY 2=OUT-ONLY 3=LOCKED (== DoorMode).
 // ===========================================================================
 #if RADIO_USES_ZIGBEE
 
 #define ZB_EP_DOORLOCK   10
-#define ZB_EP_OCCUPANCY  11
-#define ZB_EP_PETCOUNT   12
-
-// Manufacturer-specific enum on the Door Lock cluster carrying the 4 operating
-// modes. Standard Lock/Unlock maps onto LOCKED/UNLOCKED; this attribute adds the
-// directional IN-ONLY / OUT-ONLY modes the standard cluster has no slot for.
-#define PETDOOR_ATTR_MODE 0xF000
+#define ZB_EP_MODE       11
+#define ZB_EP_OCCUPANCY  12
+#define ZB_EP_PETCOUNT   13
 
 // ZCL Door Lock "LockState" attribute values (the SDK exposes no enum for these).
 #define DOORLOCK_STATE_LOCKED   1
 #define DOORLOCK_STATE_UNLOCKED 2
 
 // Door Lock endpoint built directly on the Door Lock (0x0101) cluster, since the
-// Arduino-ESP32 Zigbee library ships no door-lock wrapper class.
+// Arduino-ESP32 Zigbee library ships no door-lock wrapper class. Used as the
+// security/lock surface; LockState reflects whether the door is in LOCKED mode.
 class ZigbeePetDoorLock : public ZigbeeEP {
 public:
   explicit ZigbeePetDoorLock(uint8_t endpoint) : ZigbeeEP(endpoint) {
     _device_id = ESP_ZB_HA_DOOR_LOCK_DEVICE_ID;
 
     esp_zb_door_lock_cfg_t lock_cfg = ESP_ZB_DEFAULT_DOOR_LOCK_CONFIG();
-    esp_zb_cluster_list_t *cluster_list = esp_zb_door_lock_clusters_create(&lock_cfg);
-
-    // Add the manufacturer-specific mode enum to the Door Lock server cluster.
-    esp_zb_attribute_list_t *lock_cluster = esp_zb_cluster_list_get_cluster(
-        cluster_list, ESP_ZB_ZCL_CLUSTER_ID_DOOR_LOCK, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
-    esp_zb_cluster_add_attr(
-        lock_cluster, ESP_ZB_ZCL_CLUSTER_ID_DOOR_LOCK, PETDOOR_ATTR_MODE,
-        ESP_ZB_ZCL_ATTR_TYPE_8BIT_ENUM,
-        ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &_mode);
-
-    _cluster_list = cluster_list;
+    _cluster_list = esp_zb_door_lock_clusters_create(&lock_cfg);
     _ep_config = {
       .endpoint           = endpoint,
       .app_profile_id     = ESP_ZB_AF_HA_PROFILE_ID,
@@ -601,54 +596,54 @@ public:
     };
   }
 
-  void setModeCallback(void (*cb)(uint8_t)) { _modeCb = cb; }
+  // Called when the hub writes LockState (true = Locked). Lock/Unlock issued as
+  // ZCL commands may not route here on every stack; the Multistate select is the
+  // reliable control path for all 4 modes.
+  void setLockCallback(void (*cb)(bool)) { _lockCb = cb; }
 
-  // Push the current mode (and a coherent lock state) to the coordinator.
-  void publishMode(uint8_t mode) {
-    _mode = mode;
-    uint8_t lockState = (mode == MODE_LOCKED)
-        ? DOORLOCK_STATE_LOCKED
-        : DOORLOCK_STATE_UNLOCKED;
+  void publishLocked(bool locked) {
+    uint8_t st = locked ? DOORLOCK_STATE_LOCKED : DOORLOCK_STATE_UNLOCKED;
     esp_zb_lock_acquire(portMAX_DELAY);
     esp_zb_zcl_set_attribute_val(_endpoint, ESP_ZB_ZCL_CLUSTER_ID_DOOR_LOCK,
-        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, PETDOOR_ATTR_MODE, &_mode, false);
-    esp_zb_zcl_set_attribute_val(_endpoint, ESP_ZB_ZCL_CLUSTER_ID_DOOR_LOCK,
         ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_DOOR_LOCK_LOCK_STATE_ID,
-        &lockState, false);
+        &st, false);
     esp_zb_lock_release();
   }
 
 private:
   void zbAttributeSet(const esp_zb_zcl_set_attr_value_message_t *message) override {
-    if (message->info.cluster != ESP_ZB_ZCL_CLUSTER_ID_DOOR_LOCK) return;
-    if (message->attribute.id == PETDOOR_ATTR_MODE) {
-      _mode = *(uint8_t *)message->attribute.data.value;
-    } else if (message->attribute.id == ESP_ZB_ZCL_ATTR_DOOR_LOCK_LOCK_STATE_ID) {
+    if (message->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_DOOR_LOCK &&
+        message->attribute.id == ESP_ZB_ZCL_ATTR_DOOR_LOCK_LOCK_STATE_ID) {
       uint8_t st = *(uint8_t *)message->attribute.data.value;
-      _mode = (st == DOORLOCK_STATE_LOCKED) ? MODE_LOCKED : MODE_UNLOCKED;
-    } else {
-      return;
+      if (_lockCb) _lockCb(st == DOORLOCK_STATE_LOCKED);
     }
-    if (_mode > MODE_LOCKED) _mode = MODE_LOCKED;
-    if (_modeCb) _modeCb(_mode);
   }
 
-  void (*_modeCb)(uint8_t) = nullptr;
-  uint8_t _mode = MODE_UNLOCKED;
+  void (*_lockCb)(bool) = nullptr;
 };
 
 ZigbeePetDoorLock     zbLock(ZB_EP_DOORLOCK);
+ZigbeeMultistate      zbMode(ZB_EP_MODE);
 ZigbeeOccupancySensor zbOccupancy(ZB_EP_OCCUPANCY);
 ZigbeeAnalog          zbPetCount(ZB_EP_PETCOUNT);
 
-// Coordinator wrote a new mode -> apply locally (runs in the Zigbee task).
-void onZigbeeMode(uint8_t mode) {
-  doorMode = (DoorMode)mode;
+// Single source of truth: apply a mode (from either Zigbee surface) locally.
+// Runs in the Zigbee task; doorMode is volatile.
+static void applyMode(DoorMode m) {
+  if (m > MODE_LOCKED) m = MODE_LOCKED;
+  doorMode = m;
   Log.printf("Zigbee: mode -> %s\n", modeName(doorMode));
 }
+void onZigbeeLock(bool locked) { applyMode(locked ? MODE_LOCKED : MODE_UNLOCKED); }
+void onZigbeeMode(uint16_t state) { applyMode((DoorMode)state); }
 
 void zigbeeSetup() {
-  zbLock.setModeCallback(onZigbeeMode);
+  zbLock.setLockCallback(onZigbeeLock);
+
+  zbMode.addMultistateOutput();
+  zbMode.setMultistateOutputStates(4);   // 0=UNLOCKED 1=IN-ONLY 2=OUT-ONLY 3=LOCKED
+  zbMode.setMultistateOutputDescription("Pet door access mode");
+  zbMode.onMultistateOutputChange(onZigbeeMode);
 
   zbOccupancy.setManufacturerAndModel("DIY", "SmartPetDoor");
   zbOccupancy.setOccupancy(false);
@@ -658,6 +653,7 @@ void zigbeeSetup() {
   zbPetCount.setAnalogInputReporting(0, 30, 1.0f);   // report on change, ≤30s
 
   Zigbee.addEndpoint(&zbLock);
+  Zigbee.addEndpoint(&zbMode);
   Zigbee.addEndpoint(&zbOccupancy);
   Zigbee.addEndpoint(&zbPetCount);
 
@@ -673,10 +669,12 @@ void zigbeeSetup() {
   while (!Zigbee.connected() && millis() - t0 < 30000) { handleLog(); delay(100); }
   Log.println(Zigbee.connected() ? "Zigbee: connected." : "Zigbee: not joined (will retry).");
 
-  zbLock.publishMode(doorMode);
+  zbLock.publishLocked(doorMode == MODE_LOCKED);
+  zbMode.setMultistateOutput(doorMode);
 }
 
-// Mirror local state to the coordinator when it changes.
+// Mirror local state to the coordinator when it changes. Both mode surfaces are
+// pushed together so the lock entity and the select stay coherent.
 void zigbeePublish() {
   static int16_t  lastInside = -1;
   static DoorMode lastMode   = (DoorMode)0xFF;
@@ -689,7 +687,9 @@ void zigbeePublish() {
   }
   if (doorMode != lastMode) {
     lastMode = doorMode;
-    zbLock.publishMode(doorMode);
+    zbLock.publishLocked(doorMode == MODE_LOCKED);
+    zbMode.setMultistateOutput(doorMode);
+    zbMode.reportMultistateOutput();
   }
 }
 #else

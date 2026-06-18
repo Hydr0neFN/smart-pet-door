@@ -172,17 +172,20 @@ Four remotely configurable access modes are enforced by direction of travel from
 | Entering (IN) — outside radar | ✓ | ✓ | ✗ | ✗ |
 | Leaving (OUT) — inside radar | ✓ | ✗ | ✓ | ✗ |
 
-The Zigbee surface (built in `deploy-zigbee` / `debug-both`) exposes three endpoints:
+The Zigbee surface (built in `deploy-zigbee` / `debug-both`) exposes four endpoints:
 
-- **Door Lock cluster** — operating mode `UNLOCKED / IN-ONLY / OUT-ONLY / LOCKED`. Standard Lock/Unlock maps onto LOCKED/UNLOCKED; a manufacturer-specific enum attribute (`0xF000`) carries the directional IN-ONLY / OUT-ONLY modes the standard cluster has no slot for. Built as a custom endpoint since the Arduino-ESP32 Zigbee library ships no door-lock wrapper.
+- **Door Lock cluster** — the security/lock surface. The device advertises as a Door Lock and the standard `LockState` reflects whether the door is in `LOCKED` mode (readable by any generic controller).
+- **Multistate Output cluster** — the 4-way access mode `UNLOCKED / IN-ONLY / OUT-ONLY / LOCKED` (indices 0–3). A standard cluster, so hubs (ZHA / Zigbee2MQTT) expose it as a writable select with no custom quirk.
 - **Occupancy Sensing cluster** — `occupied` flag (true while a pet is inside).
 - **Analog Input cluster** — live pet count (pets currently inside), reported on change.
 
+Both mode surfaces stay coherent with the firmware's `doorMode`: setting `LOCKED` on either flips the Door Lock to Locked, and any mode change is pushed to both.
+
 ### Zigbee implementation notes (the *why*)
 
-- **Uses esp-zigbee-sdk via the framework, not a separate dependency.** Arduino-ESP32 v3.x (the pioarduino fork) *vendors* Espressif's [esp-zigbee-sdk](https://github.com/espressif/esp-zigbee-sdk) — the `esp_zb_*` API plus the precompiled zboss libraries. `#include <Zigbee.h>` is the thin Arduino wrapper on top. The custom door-lock endpoint calls the SDK directly (`esp_zb_door_lock_clusters_create`, `esp_zb_cluster_add_attr`, …); the `ZIGBEE_MODE_ED` build flag links zboss from the framework. No `lib_deps` entry — adding the SDK repo separately would clash with the bundled copy.
-- **Custom Door Lock endpoint.** The Arduino wrapper has classes for Occupancy and Analog (used as-is) but **none for Door Lock**, so `ZigbeePetDoorLock` is a hand-built `ZigbeeEP` subclass on cluster `0x0101`.
-- **Manufacturer attr `0xF000` for the 4 modes.** Standard ZCL Door Lock is binary (Lock/Unlock, LockState Locked/Unlocked) — no slot for directional IN-ONLY/OUT-ONLY. So LOCKED/UNLOCKED map onto the standard state (any generic controller can read the lock) while the full 4-way mode rides a manufacturer-specific enum.
+- **Uses esp-zigbee-sdk via the framework, not a separate dependency.** Arduino-ESP32 v3.x (the pioarduino fork) *vendors* Espressif's [esp-zigbee-sdk](https://github.com/espressif/esp-zigbee-sdk) — the `esp_zb_*` API plus the precompiled zboss libraries. `#include <Zigbee.h>` is the thin Arduino wrapper on top. The custom door-lock endpoint calls the SDK directly (`esp_zb_door_lock_clusters_create`, …); the `ZIGBEE_MODE_ED` build flag links zboss from the framework. No `lib_deps` entry — adding the SDK repo separately would clash with the bundled copy.
+- **Why Multistate for the mode, not a manufacturer attr.** Standard ZCL Door Lock is binary (LockState Locked/Unlocked) — no slot for directional IN-ONLY/OUT-ONLY. The first cut carried the 4 modes in a *manufacturer-specific* attribute on the Door Lock cluster, but generic hubs can't see that without a custom converter/quirk. A **standard Multistate Output** is exposed natively as a 4-option select, so the modes are controllable out of the box. The Door Lock cluster is kept purely as the security/lock advertise + status.
+- **Custom Door Lock endpoint; stock everything else.** The Arduino wrapper has classes for Multistate, Occupancy and Analog (all used as-is), but **none for Door Lock**, so `ZigbeePetDoorLock` is a hand-built `ZigbeeEP` subclass on cluster `0x0101`.
 - **`lib_ignore = Zigbee` in the non-Zigbee env.** The bundled Zigbee lib compiles regardless, but zboss only links with `ZIGBEE_MODE_ED`; without it the build fails at link (`undefined reference to esp_zb_ep_list_create`). Ignoring the lib in `debug-wifi` avoids that.
 - **No-OTA partition.** The zboss image (~1.39 MB) overflows the stock dual-OTA `zigbee.csv` app slot (1.31 MB each) on a 4 MB flash. `partitions_zigbee.csv` trades OTA for one 2.5 MB app slot.
 

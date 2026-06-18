@@ -50,8 +50,12 @@ This file captures the non-obvious constraints; the README is the human-facing o
   entry; `ZIGBEE_MODE_ED` links zboss from the framework. Don't add the SDK repo separately.
 - Arduino-ESP32 ships **no door-lock wrapper** → `ZigbeePetDoorLock` is a custom `ZigbeeEP`
   subclass on the Door Lock cluster (0x0101), built from `esp_zb_door_lock_clusters_create`.
-  4 modes (UNLOCKED/IN-ONLY/OUT-ONLY/LOCKED) ride a manufacturer-specific enum attr `0xF000`;
-  standard Lock/Unlock maps onto LOCKED/UNLOCKED.
+  It's the **security/lock surface only**: `LockState` reflects LOCKED-mode.
+- **4-mode access (UNLOCKED/IN-ONLY/OUT-ONLY/LOCKED) rides a stock `ZigbeeMultistate`**
+  (Multistate Output, indices 0–3) — a standard cluster, so ZHA/Z2M expose it as a writable
+  select with no custom quirk. (An earlier cut used a manufacturer attr `0xF000` on the door
+  lock; dropped because generic hubs can't control it without a converter.) Keep both coherent
+  with `doorMode`; push lock + multistate together on any change.
 - esp-zigbee-sdk symbol gotchas learned the hard way:
   - Role constant is `ESP_ZB_ZCL_CLUSTER_SERVER_ROLE` (NOT `..._ROLE_SERVER`).
   - There is **no enum for LockState values** — use raw ZCL numbers (1=Locked, 2=Unlocked).
