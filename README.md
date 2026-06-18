@@ -4,7 +4,7 @@ A thermally insulated, electronically actuated pet door that opens only on confi
 
 > Conventional flap doors leave a permanent gap in the building envelope and can raise HVAC demand by 6%+ annually. This door seals the opening completely when idle and opens only when a pet actually approaches, then closes and re-seals behind them.
 
-Built on an **ESP32-C6** with dual mmWave radar presence detection, a Time-of-Flight anti-pinch safety curtain, and two silent TMC2130-driven stepper motors. Designed for smart-home integration over Zigbee/Matter.
+Built on an **ESP32-C6** with dual mmWave radar presence detection, a Time-of-Flight anti-pinch safety curtain, and two silent TMC2130-driven stepper motors. Integrates with smart homes over **Zigbee** (Door Lock + Occupancy clusters), with Matter-over-Thread as the upgrade path on the same hardware.
 
 ---
 
@@ -18,7 +18,7 @@ Built on an **ESP32-C6** with dual mmWave radar presence detection, a Time-of-Fl
 - [Build & Flash](#build--flash)
 - [Configuration](#configuration)
 - [Safety System](#safety-system)
-- [Access Modes & Connectivity](#access-modes--connectivity-design-target)
+- [Access Modes & Connectivity](#access-modes--connectivity)
 - [Roadmap](#roadmap)
 - [Authors](#authors)
 
@@ -26,75 +26,84 @@ Built on an **ESP32-C6** with dual mmWave radar presence detection, a Time-of-Fl
 
 ## How It Works
 
-A pair of **24 GHz mmWave radars** — one **LD2450** and one **LD2410** — watch each side of the threshold (indoor + outdoor). When one detects a target approaching, the controller swings the door open. Once the radar field is clear for a hold delay, the door closes. A downward-facing **VL53L1X ToF sensor** at the gate acts as an invisible safety curtain — any obstruction detected during closing reverses the door (anti-pinch).
+A pair of **24 GHz mmWave radars** watch each side of the threshold:
 
-> The design called for two LD2450s, but one arrived dead, so the build pairs one LD2450 (multi-target, direction-aware) with one LD2410 (presence-only). Note that the firmware's radar parser currently decodes the **LD2450** frame format only (`AA FF 03 00 … 55 CC`); the LD2410 speaks a different UART protocol and needs its own parser before that channel reports presence.
+- **Inside — LD2450** (UART0): multi-target list, presence + active-target count.
+- **Outside — LD2410** (UART1): single presence/state report.
 
-The firmware runs a four-state machine:
+When a radar detects a target approaching (and the current access mode permits that direction), the controller swings the door open. Once the field is clear for a hold delay, the door closes. A **VL53L1X ToF sensor** at the gate is an invisible safety curtain — any obstruction during closing reverses the door (anti-pinch) — and doubles as the mid-gate "crossing" event used to count pets.
+
+> The design called for two LD2450s, but one arrived dead, so the build pairs one LD2450 with one LD2410. The firmware now decodes **both** UART protocols (LD2450 `AA FF 03 00 … 55 CC`; LD2410 `F4 F3 F2 F1 | len | … | F8 F7 F6 F5`), selected per radar slot.
+
+The door runs a four-state machine:
 
 ```
-        radar present / timer            reached open angle
+        radar present (mode-gated)        reached open angle
 CLOSED ───────────────────────► OPENING ───────────────────► OPEN
    ▲                                                            │
-   │ reached 0  (or door switch)                 clear + delay  │
+   │ both leaves shut (end-stop or pos 0)        clear + delay  │
    │                                                            ▼
    └──────────────── CLOSING ◄─────────────────────────────────┘
                         │
        ToF obstruction  │  → reverse → OPENING  (anti-pinch)
 ```
 
-Two NEMA 17 motors are mounted **back-to-back** at the hinge and driven in mirror (motor 2 runs the negated target of motor 1), so the bi-parting panels open together. Drivers stay enabled at standstill so holding torque keeps the door shut against a push, while a reduced hold current (`IHOLD ≈ 0.3 × IRUN`) keeps the motors cool and quiet at rest.
+Two NEMA 17 motors are mounted **back-to-back** at the hinge and driven in mirror (leaf 2 runs the negated target of leaf 1), so the bi-parting panels move as one aperture. Each leaf can carry its own end-stop switch (independently enable-able) as the closed ground-truth. Drivers stay enabled at standstill so holding torque keeps the door shut against a push, while a reduced hold current (`IHOLD ≈ 0.3 × IRUN`) keeps the motors cool and quiet at rest.
+
+### Pet counting
+
+A pass is counted only when the full sequence is observed within timeouts: one side's radar → the ToF beam is crossed → the **other** side's radar. Direction sets the running occupancy: outside→inside is `+1`, inside→outside is `−1` (floored at 0). The live count is published over Zigbee (see below). Counting requires the ToF sensor (`USE_TOF 1`).
 
 ## Features
 
 - **Silent actuation** — TMC2130 StealthChop eliminates the audible whine of A4988/DRV8825-class drivers.
-- **Presence detection, not contact** — 24 GHz FMCW radar detects an approaching animal at a distance; the LD2450's multi-target tracking can distinguish direction of travel (the LD2410 reports presence only).
+- **Dual-protocol radar** — LD2450 (multi-target/direction-capable) inside, LD2410 (presence) outside, each with its own frame parser and a staleness guard.
 - **Pre-emptive anti-pinch** — ToF curtain halts and reverses the door *before* contact, not after.
 - **Secure at rest** — backdrivable drivetrain held closed by motor torque; resists being shoved open.
-- **Dual-radar, selectable trigger** — inside-only, outside-only, or a radar-free timed test cycle, set at compile time.
-- **Smart-home ready** — ESP32-C6 carries Wi-Fi 6, BLE 5, and an 802.15.4 radio for Zigbee today / Thread + Matter as the upgrade path.
+- **Per-leaf end-stops** — two independent switches (`END_STOP1`/`END_STOP2`), each separately enable-able, used for homing and as the closed ground-truth.
+- **Directional pet counting** — radar → ToF → radar pass detection maintains live occupancy.
+- **Smart-home native** — Zigbee Door Lock (access mode), Occupancy Sensing (occupied), and Analog Input (pet count) clusters; selectable radio profile at build time.
 
 ## Hardware
 
 | Subsystem | Part | Notes |
 |---|---|---|
 | MCU | **ESP32-C6** DevKitM-1 | RISC-V, Wi-Fi 6, BLE 5, 802.15.4 (Zigbee/Thread), Matter-ready |
-| Motor driver | **TMC2130** ×2 | StealthChop (silent), StallGuard, SPI config, 1/256 µstep |
+| Motor driver | **TMC2130** ×2 | StealthChop (silent), SPI config, 1/16 µstep |
 | Motor | **NEMA 17** ×2 | 1.8°/step, 0.3–0.6 Nm, direct hinge drive, back-to-back mount |
-| Presence | **LD2450** ×1 + **LD2410** ×1 | 24 GHz FMCW, UART, ~5 m, one per side. LD2410 substituted after an LD2450 arrived dead; LD2450 does multi-target/direction, LD2410 presence-only |
+| Presence | **LD2450** ×1 + **LD2410** ×1 | 24 GHz FMCW, UART @256000, ~5 m, one per side. LD2410 substituted after an LD2450 arrived dead |
 | Safety | **VL53L1X** ToF ×1 | I²C, 940 nm (no radar interference), downward gate mount |
 | Power | 12 V SMPS → **LM2596** buck → 5 V | 12 V to drivers, 5 V to MCU + sensors; 1000 µF back-EMF caps per driver |
 | Panel | Steel-faced **20 mm PIR foam** + rubber gasket | R ≈ 0.87 m²·K/W; overlapping bi-parting panels with perimeter seal |
 
-A full Bill of Materials (fasteners, structural panels, connectors) and the design rationale for every part choice are in the project documentation.
+A full Bill of Materials and the design rationale for every part choice are in the project documentation.
 
 ## GPIO Pin Map
 
-As wired in [`src/main.cpp`](src/main.cpp) for the ESP32-C6:
+As wired in [`src/main.cpp`](src/main.cpp) for the ESP32-C6 (matches the board wiring table):
 
 | Function | GPIO | Bus | Connects to |
 |---|---|---|---|
-| SPI SCK | 19 | SPI | TMC2130 ×2 — SCK |
-| SPI MISO | 12 | SPI | TMC2130 ×2 — SDO |
-| SPI MOSI | 20 | SPI | TMC2130 ×2 — SDI |
+| SPI SCK / MISO / MOSI | 19 / 12 / 20 | SPI | TMC2130 ×2 |
 | Enable (shared, active-low) | 21 | — | TMC2130 ×2 — EN |
-| Driver 1 STEP / DIR / CS | 11 / 10 / 18 | SPI/step | Motor driver 1 |
-| Driver 2 STEP / DIR / CS | 23 / 22 / 3 | SPI/step | Motor driver 2 |
-| ToF SDA / SCL | 6 / 7 | I²C | VL53L1X |
-| Radar 1 (inside) RX / TX | 17 / 16 | UART0 | mmWave radar #1 |
-| Radar 2 (outside) RX / TX | 4 / 5 | UART1 | mmWave radar #2 |
-| Door switch (reserved) | 1 | — | Disabled until wired (`USE_DOOR_SWITCH 0`) |
+| Driver 1 STEP / DIR / CS | 11 / 10 / 18 | SPI/step | Motor driver 1 (leaf 1) |
+| Driver 2 STEP / DIR / CS | 23 / 22 / 3 | SPI/step | Motor driver 2 (leaf 2) |
+| End-stop 1 / End-stop 2 | 13 / 2 | — | Per-leaf closed switch (`USE_END_STOP1/2`) |
+| ToF SDA / SCL / INT | 6 / 7 / 0 | I²C | VL53L1X |
+| Radar 1 inside (RX / TX) | 17 / 16 | UART0 | LD2450 |
+| Radar 2 outside (RX / TX) | 4 / 5 | UART1 | LD2410 |
+| Status NeoPixel | 8 | — | Onboard WS2812 |
 
-> The ESP32-C6 console runs over USB-Serial-JTAG (HWCDC), leaving both hardware UARTs free for the two radars. The door-position switch is reserved on GPIO1 but not yet on the PCB; without it the firmware assumes "shut" at boot (`pos = 0`).
+> **Console caveat:** the inside radar (LD2450) sits on **UART0 (GPIO16/17)** — the same pins as the CH340 USB-serial console — and the native USB-Serial-JTAG pins (GPIO12/13) are reused for MISO / END_STOP1. So once the inside radar is wired, the CH340 console is unavailable and **Wi-Fi telnet is the live log path**. The CH340 console is only usable when the inside radar is disabled (`USE_RADAR_IN 0`). The status NeoPixel encodes the current stage as a fallback when no log is attached.
 
 ## Repository Layout
 
 ```
 .
-├── platformio.ini          PlatformIO env: esp32-c6-devkitm-1, deps, build flags
+├── platformio.ini          Three build envs (debug-wifi / deploy-zigbee / debug-both)
+├── partitions_zigbee.csv   Single-app (no-OTA) 4MB layout for the Zigbee build
 ├── src/
-│   ├── main.cpp            Current firmware — dual-motor door state machine
-│   ├── main.old            Earlier single-motor build with StallGuard/DIAG1 stall ISR
+│   ├── main.cpp            Firmware — dual-radar door FSM, pet counting, Zigbee
 │   └── ToF_Code.ino.ref    Standalone VL53L1X polling reference sketch
 ├── include/                Project headers
 ├── lib/                    Private libraries
@@ -103,18 +112,27 @@ As wired in [`src/main.cpp`](src/main.cpp) for the ESP32-C6:
 
 ## Build & Flash
 
-Requires [PlatformIO](https://platformio.org/) (CLI or the VS Code extension).
+Requires [PlatformIO](https://platformio.org/) (CLI or the VS Code extension). The C6 board is **not** in the official `espressif32` platform (Arduino-ESP32 v2.x), so `platformio.ini` pins the [pioarduino](https://github.com/pioarduino/platform-espressif32) fork (Arduino-ESP32 v3.x). Dependencies (`TMCStepper`, `FastAccelStepper`, `Adafruit VL53L1X`) resolve on first build.
+
+The ESP32-C6 carries both a 2.4 GHz Wi-Fi radio and an 802.15.4 (Zigbee) radio. Pick a **radio profile** by choosing the build env — each sets the `RADIO_MODE` flag:
+
+| Env | `RADIO_MODE` | Radio | Logging | Use |
+|---|:---:|---|---|---|
+| `debug-wifi` *(default)* | 0 | Wi-Fi only | telnet `:23` (+ CH340 if inside radar off) | bring-up / debugging |
+| `deploy-zigbee` | 1 | Zigbee only | USB serial (when inside radar off) | shipping smart-home device |
+| `debug-both` | 2 | Wi-Fi + Zigbee (coex) | telnet `:23` | debugging Zigbee with live logs (higher RAM) |
 
 ```bash
-# Build
-pio run
+# Build a profile
+pio run -e debug-wifi
+pio run -e deploy-zigbee
 
-# Flash + open serial monitor (115200 baud)
-pio run --target upload
+# Flash + monitor (debug build over CH340, only valid when inside radar disabled)
+pio run -e deploy-zigbee -t upload
 pio device monitor -b 115200
 ```
 
-The C6 board is **not** in the official `espressif32` platform (Arduino-ESP32 v2.x), so `platformio.ini` pins the [pioarduino](https://github.com/pioarduino/platform-espressif32) fork (Arduino-ESP32 v3.x). Library dependencies (`TMCStepper`, `FastAccelStepper`, `Adafruit VL53L1X`) are resolved automatically on first build.
+Wi-Fi builds log over telnet: connect to `petdoor.local:23` (or the device IP) — the boot backlog is replayed to a late-joining client. The Zigbee build uses a single-app, **no-OTA** partition (`partitions_zigbee.csv`) because the zboss stack pushes the image past the stock dual-OTA `zigbee.csv` app slot.
 
 ## Configuration
 
@@ -122,48 +140,55 @@ Key compile-time options at the top of [`src/main.cpp`](src/main.cpp):
 
 | Macro | Default | Purpose |
 |---|---|---|
-| `RADAR_SEL` | `0` | Trigger source: `0` = timed test cycle (no radar), `1` = inside radar drives door, `2` = outside radar |
+| `RADIO_MODE` | per-env | `0` Wi-Fi / `1` Zigbee / `2` both — set by the PlatformIO env, not edited by hand |
+| `USE_RADAR_IN` / `USE_RADAR_OUT` | `1` / `1` | Enable each radar slot; disabling the inside radar frees UART0 for the CH340 console |
+| `TEST_TIMED_CYCLE` | `0` | `1` = ignore radars and cycle the door on timers (mechanical bring-up) |
+| `USE_END_STOP1` / `USE_END_STOP2` | `0` / `0` | Enable each per-leaf closed switch once wired |
+| `USE_TOF` | `0` | Enable VL53L1X — required for anti-pinch **and** pet counting |
 | `OPEN_DEG` | `180` | Door open angle in degrees |
 | `RMS_CURRENT` | `800` | Motor run current (mA, IRUN) |
-| `IHOLD_MULT` | `0.3` | Standstill hold current as a fraction of run current — lower = cooler/quieter, raise if the door can be shoved open |
+| `IHOLD_MULT` | `0.3` | Standstill hold current as a fraction of run current |
 | `CLOSE_DELAY_MS` | `3000` | Radar-clear hold before the door starts closing |
-| `TOF_DETECT_MM` | `350` | ToF distance below which an obstruction is flagged (with a 40 mm blind-spot floor) |
-| `USE_DOOR_SWITCH` | `0` | Enable the closed-position switch as homing ground-truth once wired |
+| `TOF_DETECT_MM` | `350` | ToF distance below which an obstruction is flagged (40 mm blind-spot floor) |
 
-`RADAR_SEL 0` is the safe bring-up default: it cycles the door on a timer with no radar hardware attached, so you can validate motion, the ToF anti-pinch reverse, and current/heat before wiring the radars.
+`TEST_TIMED_CYCLE 1` is the safe bring-up default for mechanics: it cycles the door on a timer with no radar attached, so you can validate motion, the ToF anti-pinch reverse, and current/heat before wiring the radars.
 
 ## Safety System
 
-The design specifies three tiers of obstruction protection; tiers 1–2 are pre-emptive (act before contact):
+Three tiers of obstruction protection were specified; tiers 1–2 are pre-emptive (act before contact):
 
 | Tier | Sensor | Method | Status |
 |---|---|---|---|
 | 1 | VL53L1X ToF | Distance poll during close → reverse | ✅ Implemented (anti-pinch reopen) |
 | 2 | mmWave radar | Presence-hold keeps door open while occupied | ✅ Implemented |
-| 3 | TMC2130 StallGuard | Back-EMF stall readback over SPI | 🔧 Prototyped in `main.old`, not on current PCB |
+| 3 | TMC2130 StallGuard | Back-EMF stall readback over SPI | ❌ Dropped — StallGuard requires SpreadCycle and cannot coexist with the chosen StealthChop mode; ToF covers obstruction instead |
 
-## Access Modes & Connectivity (design target)
+## Access Modes & Connectivity
 
-The full design defines four remotely configurable access modes, enforced by direction of travel from the radar pair, plus a Zigbee-reported occupancy count:
+Four remotely configurable access modes are enforced by direction of travel from the radar pair:
 
 | Direction \ Mode | UNLOCKED | IN-ONLY | OUT-ONLY | LOCKED |
 |---|:---:|:---:|:---:|:---:|
-| Entering (IN) | ✓ | ✓ | ✗ | ✗ |
-| Leaving (OUT) | ✓ | ✗ | ✓ | ✗ |
+| Entering (IN) — outside radar | ✓ | ✓ | ✗ | ✗ |
+| Leaving (OUT) — inside radar | ✓ | ✗ | ✓ | ✗ |
 
-Planned Zigbee surface: a **Door Lock** cluster for mode commands and an **Occupancy Sensing** cluster for the live pet count. Matter-over-Thread is the production upgrade path on the same ESP32-C6 hardware — no board revision required.
+The Zigbee surface (built in `deploy-zigbee` / `debug-both`) exposes three endpoints:
 
-> **Note:** the firmware in this repo currently implements the motion + detection + anti-pinch core (the door state machine above). Direction-aware access modes, occupancy counting, and the Zigbee clusters are the documented design target and are not yet wired into `main.cpp`.
+- **Door Lock cluster** — operating mode `UNLOCKED / IN-ONLY / OUT-ONLY / LOCKED`. Standard Lock/Unlock maps onto LOCKED/UNLOCKED; a manufacturer-specific enum attribute (`0xF000`) carries the directional IN-ONLY / OUT-ONLY modes the standard cluster has no slot for. Built as a custom endpoint since the Arduino-ESP32 Zigbee library ships no door-lock wrapper.
+- **Occupancy Sensing cluster** — `occupied` flag (true while a pet is inside).
+- **Analog Input cluster** — live pet count (pets currently inside), reported on change.
+
+Matter-over-Thread is the production upgrade path on the same ESP32-C6 hardware — no board revision required.
 
 ## Roadmap
 
-- [ ] Add an LD2410 frame parser for the second radar channel (currently both channels are decoded as LD2450)
-- [ ] Direction-of-travel inference from LD2450 target coordinates
-- [ ] UNLOCKED / IN-ONLY / OUT-ONLY / LOCKED access-mode enforcement
-- [ ] Zigbee join + Door Lock & Occupancy Sensing clusters
-- [ ] Occupancy counting (+1 in / −1 out, floored at 0)
-- [ ] Wire the closed-position door switch (GPIO1) for homing ground-truth
-- [ ] Integrate StallGuard as the tier-3 reactive stall fallback on the production PCB
+- [x] LD2410 frame parser for the outside radar channel
+- [x] UNLOCKED / IN-ONLY / OUT-ONLY / LOCKED access-mode enforcement
+- [x] Zigbee join + Door Lock, Occupancy Sensing, and Analog (count) clusters
+- [x] Occupancy counting (+1 in / −1 out, floored at 0) via radar → ToF → radar
+- [x] Per-leaf closed-position end-stop switches for homing ground-truth
+- [ ] Direction-of-travel inference from LD2450 target coordinates (refine count accuracy)
+- [ ] OTA support (needs a larger flash or a slimmer Zigbee image to restore dual app slots)
 - [ ] Matter-over-Thread migration
 
 ## Authors
