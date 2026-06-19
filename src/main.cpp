@@ -109,6 +109,9 @@
 //   reported pos advances but motor silent -> wiring / motor-supply (VM) / coil.
 //   reported pos stays 0 -> step-generation channel for that leaf never ran (SW).
 #define MOTOR_SELFTEST 0
+// 1 = stream raw ToF + radar readings (~4 Hz) and SKIP the door FSM. Sensor
+// bring-up / aiming. Enable the sensors you want to watch (USE_TOF / USE_RADAR_*).
+#define SENSOR_DEBUG 0
 
 // ── End-stop switches ──
 // Set to 1 once the corresponding leaf switch is wired.
@@ -287,6 +290,12 @@ struct Radar {
   bool     present = false;
   uint32_t good = 0, bad = 0;
   uint32_t lastFrameMs = 0;
+
+  // extra decoded fields for SENSOR_DEBUG
+  int16_t  dx = 0, dy = 0, dspeed = 0;            // LD2450 first target: mm, mm, cm/s
+  uint8_t  state = 0;                             // LD2410 target state 0/1/2/3
+  uint16_t moveDist = 0, stillDist = 0;           // LD2410 distances (cm)
+  uint8_t  moveEnergy = 0, stillEnergy = 0;       // LD2410 energies
 };
 
 Radar radarIn  = {};   // inside  (LD2450)
@@ -296,15 +305,29 @@ static const uint8_t LD2450_HDR[4] = {0xAA, 0xFF, 0x03, 0x00};
 static const uint8_t LD2410_HDR[4] = {0xF4, 0xF3, 0xF2, 0xF1};
 static const uint8_t LD2410_FTR[4] = {0xF8, 0xF7, 0xF6, 0xF5};
 
-// LD2450: count slots whose 8-byte target block is non-zero.
+// LD2450 signed coordinate: bit15 is the sign (1 = positive), low 15 bits = magnitude.
+static inline int16_t ld2450_signed(uint16_t v) {
+  return (v & 0x8000) ? (int16_t)(v & 0x7FFF) : -(int16_t)(v & 0x7FFF);
+}
+
+// LD2450: count slots whose 8-byte target block is non-zero; decode the first
+// active target's x/y/speed for SENSOR_DEBUG.
 static void parse2450(Radar &r) {
-  uint8_t n = 0;
+  uint8_t n = 0; int8_t first = -1;
   for (uint8_t i = 0; i < 3; i++) {
     const uint8_t *p = &r.buf[4 + i * 8];
-    for (uint8_t k = 0; k < 8; k++) if (p[k]) { n++; break; }
+    for (uint8_t k = 0; k < 8; k++) if (p[k]) { if (first < 0) first = i; n++; break; }
   }
   r.targets = n;
   r.present = (n > 0);
+  if (first >= 0) {
+    const uint8_t *p = &r.buf[4 + first * 8];
+    r.dx     = ld2450_signed((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+    r.dy     = ld2450_signed((uint16_t)p[2] | ((uint16_t)p[3] << 8));
+    r.dspeed = ld2450_signed((uint16_t)p[4] | ((uint16_t)p[5] << 8));
+  } else {
+    r.dx = r.dy = r.dspeed = 0;
+  }
 }
 
 static void feed2450(Radar &r, uint8_t b) {
@@ -327,11 +350,19 @@ static void feed2450(Radar &r, uint8_t b) {
 }
 
 // LD2410: presence = target state byte != 0 (1 moving, 2 stationary, 3 both).
+// Also decode moving/stationary distance + energy for SENSOR_DEBUG.
 static void parse2410(Radar &r) {
   if (r.need >= 3 && r.buf[1] == 0xAA) {
     uint8_t st = r.buf[2];
     r.present = (st != 0x00);
     r.targets = r.present ? 1 : 0;
+    r.state   = st;
+    if (r.need >= 9) {
+      r.moveDist    = (uint16_t)r.buf[3] | ((uint16_t)r.buf[4] << 8);
+      r.moveEnergy  = r.buf[5];
+      r.stillDist   = (uint16_t)r.buf[6] | ((uint16_t)r.buf[7] << 8);
+      r.stillEnergy = r.buf[8];
+    }
   }
 }
 
@@ -454,6 +485,8 @@ bool leaf2Shut() {
 }
 bool doorShut() { return leaf1Shut() && leaf2Shut(); }
 
+int16_t tofLastMm = -1;              // last raw ToF distance (mm); -1 = none/unknown
+
 // Poll ToF; true = something inside the clear path (blocked beam).
 bool obstructed() {
 #if !USE_TOF
@@ -463,7 +496,7 @@ bool obstructed() {
   if (vl53.dataReady()) {
     int16_t d = vl53.distance();
     vl53.clearInterrupt();
-    if (d != -1) last = (d > TOF_BLIND_MM && d < TOF_DETECT_MM);
+    if (d != -1) { tofLastMm = d; last = (d > TOF_BLIND_MM && d < TOF_DETECT_MM); }
   }
   return last;
 #endif
@@ -890,6 +923,30 @@ void loop() {
 
   radarPump(radarIn,  now);
   radarPump(radarOut, now);
+
+#if SENSOR_DEBUG
+  {
+    bool blk = obstructed();           // also refreshes tofLastMm
+    (void)blk;
+    static uint32_t lastSdbg = 0;
+    if (now - lastSdbg >= 250) {        // ~4 Hz
+      lastSdbg = now;
+  #if USE_TOF
+      Log.printf("ToF d=%dmm blocked=%d | ", tofLastMm, blk);
+  #else
+      Log.printf("ToF off | ");
+  #endif
+      Log.printf("IN/LD2450 fresh=%d tgts=%u x=%d y=%d v=%dcm/s g=%lu b=%lu | ",
+                 radarPresent(radarIn, now), radarIn.targets,
+                 radarIn.dx, radarIn.dy, radarIn.dspeed, radarIn.good, radarIn.bad);
+      Log.printf("OUT/LD2410 fresh=%d st=%u mov=%ucm(e%u) sta=%ucm(e%u) g=%lu b=%lu\n",
+                 radarPresent(radarOut, now), radarOut.state,
+                 radarOut.moveDist, radarOut.moveEnergy,
+                 radarOut.stillDist, radarOut.stillEnergy, radarOut.good, radarOut.bad);
+    }
+    return;                            // sensor-debug: skip the door FSM
+  }
+#endif
 
   bool inP    = radarPresent(radarIn,  now);
   bool outP   = radarPresent(radarOut, now);
