@@ -101,6 +101,11 @@
 // ── Bench test ──
 // 1 = ignore radars and cycle the door on timers (mechanical bring-up).
 #define TEST_TIMED_CYCLE 0
+// 1 = at boot, jog each leaf on its own and log commanded vs reported position.
+// Decisive HW-vs-SW check for a dead leaf:
+//   reported pos advances but motor silent -> wiring / motor-supply (VM) / coil.
+//   reported pos stays 0 -> step-generation channel for that leaf never ran (SW).
+#define MOTOR_SELFTEST 0
 
 // ── End-stop switches ──
 // Set to 1 once the corresponding leaf switch is wired.
@@ -785,6 +790,31 @@ void setup() {
   }
   stepper->setDirectionPin(PIN_M1_DIR);
   stepper2->setDirectionPin(PIN_M2_DIR);
+
+#if MOTOR_SELFTEST
+  {
+    const int32_t j = STEPS_PER_REV / 4;          // quarter turn each leaf
+    stepper->setSpeedInHz(RUN_HZ);  stepper->setAcceleration(RUN_ACCEL);
+    stepper2->setSpeedInHz(RUN_HZ); stepper2->setAcceleration(RUN_ACCEL);
+
+    Log.println("SELFTEST: jog leaf 1 (D1 STEP=GPIO11 DIR=GPIO10)...");
+    stepper->move(j);
+    for (uint32_t t = millis(); stepper->isRunning() && millis() - t < 4000; ) delay(10);
+    Log.printf("  D1 reported pos=%ld (cmd %ld)\n",
+               (long)stepper->getCurrentPosition(), (long)j);
+    delay(800);
+
+    Log.println("SELFTEST: jog leaf 2 (D2 STEP=GPIO23 DIR=GPIO22)...");
+    stepper2->move(j);
+    for (uint32_t t = millis(); stepper2->isRunning() && millis() - t < 4000; ) delay(10);
+    Log.printf("  D2 reported pos=%ld (cmd %ld)\n",
+               (long)stepper2->getCurrentPosition(), (long)j);
+    delay(800);
+
+    Log.println("SELFTEST: pos advances + motor silent => wiring/VM/coil; "
+                "pos stuck 0 => step-gen channel for that leaf not running.");
+  }
+#endif
 
   // ToF
 #if USE_TOF
