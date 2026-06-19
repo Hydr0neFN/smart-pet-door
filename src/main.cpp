@@ -213,8 +213,10 @@ public:
     Serial.write(b);
 #endif
 #if RADIO_USES_WIFI
-    if (logClient && logClient.connected() && logClient.availableForWrite() >= 1)
-      logClient.write(b);
+    if (logClient && logClient.connected() && logClient.availableForWrite() >= 2) {
+      if (b == '\n') logClient.write((const uint8_t *)"\r\n", 2);   // raw telnet needs CR
+      else           logClient.write(b);
+    }
 #endif
     return 1;
   }
@@ -227,11 +229,21 @@ public:
     Serial.write(p, n);
 #endif
 #if RADIO_USES_WIFI
-    // One socket write per chunk, non-blocking: drop the line if the TCP buffer
-    // is full rather than block. A blocking telnet write would stall loop() and
-    // starve the software step pulses (AccelStepper), making the motors stutter.
-    if (logClient && logClient.connected() && logClient.availableForWrite() >= (int)n)
-      logClient.write(p, n);
+    // Non-blocking: drop the chunk if the TCP buffer is full rather than block
+    // (a blocking telnet write would stall loop() and starve AccelStepper's
+    // software step pulses). Translate \n -> \r\n so raw telnet clients don't
+    // stair-step.
+    if (logClient && logClient.connected() && logClient.availableForWrite() >= (int)n) {
+      size_t start = 0;
+      for (size_t i = 0; i < n; i++) {
+        if (p[i] == '\n') {
+          if (i > start) logClient.write(p + start, i - start);
+          logClient.write((const uint8_t *)"\r\n", 2);
+          start = i + 1;
+        }
+      }
+      if (start < n) logClient.write(p + start, n - start);
+    }
 #endif
     return n;
   }
@@ -289,6 +301,7 @@ struct Radar {
   uint8_t  targets = 0;          // active targets (LD2450 0..3, LD2410 0/1)
   bool     present = false;
   uint32_t good = 0, bad = 0;
+  uint32_t rxBytes = 0;          // raw bytes read off the UART (frame-agnostic)
   uint32_t lastFrameMs = 0;
 
   // extra decoded fields for SENSOR_DEBUG
@@ -403,7 +416,7 @@ static void radarFeed(Radar &r, uint8_t b) {
 static void radarPump(Radar &r, uint32_t now) {
   if (!r.ser) return;
   uint32_t before = r.good;
-  while (r.ser->available()) radarFeed(r, (uint8_t)r.ser->read());
+  while (r.ser->available()) { r.rxBytes++; radarFeed(r, (uint8_t)r.ser->read()); }
   if (r.good != before) r.lastFrameMs = now;
 }
 
@@ -936,13 +949,15 @@ void loop() {
   #else
       Log.printf("ToF off | ");
   #endif
-      Log.printf("IN/LD2450 fresh=%d tgts=%u x=%d y=%d v=%dcm/s g=%lu b=%lu | ",
+      Log.printf("IN/LD2450 fresh=%d tgts=%u x=%d y=%d v=%dcm/s rx=%lu g=%lu b=%lu | ",
                  radarPresent(radarIn, now), radarIn.targets,
-                 radarIn.dx, radarIn.dy, radarIn.dspeed, radarIn.good, radarIn.bad);
-      Log.printf("OUT/LD2410 fresh=%d st=%u mov=%ucm(e%u) sta=%ucm(e%u) g=%lu b=%lu\n",
+                 radarIn.dx, radarIn.dy, radarIn.dspeed,
+                 radarIn.rxBytes, radarIn.good, radarIn.bad);
+      Log.printf("OUT/LD2410 fresh=%d st=%u mov=%ucm(e%u) sta=%ucm(e%u) rx=%lu g=%lu b=%lu\n",
                  radarPresent(radarOut, now), radarOut.state,
                  radarOut.moveDist, radarOut.moveEnergy,
-                 radarOut.stillDist, radarOut.stillEnergy, radarOut.good, radarOut.bad);
+                 radarOut.stillDist, radarOut.stillEnergy,
+                 radarOut.rxBytes, radarOut.good, radarOut.bad);
     }
     return;                            // sensor-debug: skip the door FSM
   }
