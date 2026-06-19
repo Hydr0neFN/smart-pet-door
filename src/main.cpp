@@ -99,8 +99,11 @@
 #define RADAR_STALE_MS   1500         // presence ignored if no fresh frame within
 
 // ── Bench test ──
-// 1 = ignore radars and cycle the door on timers (mechanical bring-up).
-#define TEST_TIMED_CYCLE 0
+// Door trigger is derived from the radar config — no separate flag to forget:
+// with BOTH radars disabled there is nothing to trigger the door, so it falls
+// back to a timed open/close cycle (mechanical bring-up). Any radar enabled =>
+// radar-driven.
+#define TEST_TIMED_CYCLE (!USE_RADAR_IN && !USE_RADAR_OUT)
 // 1 = at boot, jog each leaf on its own and log commanded vs reported position.
 // Decisive HW-vs-SW check for a dead leaf:
 //   reported pos advances but motor silent -> wiring / motor-supply (VM) / coil.
@@ -207,12 +210,26 @@ public:
     Serial.write(b);
 #endif
 #if RADIO_USES_WIFI
-    if (logClient && logClient.connected()) logClient.write(b);
+    if (logClient && logClient.connected() && logClient.availableForWrite() >= 1)
+      logClient.write(b);
 #endif
     return 1;
   }
   size_t write(const uint8_t *p, size_t n) override {
-    for (size_t i = 0; i < n; i++) write(p[i]);
+    for (size_t i = 0; i < n; i++) {           // ring copy only (no blocking I/O)
+      ring[head++] = (char)p[i];
+      if (head >= CAP) { head = 0; wrapped = true; }
+    }
+#if LOG_TO_SERIAL
+    Serial.write(p, n);
+#endif
+#if RADIO_USES_WIFI
+    // One socket write per chunk, non-blocking: drop the line if the TCP buffer
+    // is full rather than block. A blocking telnet write would stall loop() and
+    // starve the software step pulses (AccelStepper), making the motors stutter.
+    if (logClient && logClient.connected() && logClient.availableForWrite() >= (int)n)
+      logClient.write(p, n);
+#endif
     return n;
   }
 #if RADIO_USES_WIFI
@@ -387,6 +404,20 @@ void configDriver(TMC2130Stepper &d, uint16_t rms, const char *tag) {
   Log.print(tag); Log.print(" en_pwm_mode="); Log.print(d.en_pwm_mode());
   Log.print(" autoscale=");          Log.print(d.pwm_autoscale());
   Log.print(" TOFF=");               Log.println(d.toff());
+
+  // version() rides SPI, which is powered by VIO (3V3) — it reads 0x11 even with
+  // NO 12V motor supply (VM). The charge pump and coils need VM, so a missing VM
+  // shows up here, not in the version check. Surface it instead of a silent motor.
+  (void)d.GSTAT();                   // clear stale latched flags
+  delay(5);
+  uint8_t g = d.GSTAT();             // fresh read
+  bool uv  = g & 0x04;               // uv_cp : charge-pump undervoltage
+  bool err = g & 0x02;               // drv_err
+  Log.printf("%s GSTAT=0x%02X (uv_cp=%d drv_err=%d) DRV_STATUS=0x%05lX ola=%d olb=%d cs=%d\n",
+             tag, g, uv, err, (unsigned long)d.DRV_STATUS(),
+             d.ola(), d.olb(), d.cs_actual());
+  if (uv)  Log.printf("%s WARN: charge-pump undervoltage -> 12V motor supply (VM) missing/low?\n", tag);
+  if (err) Log.printf("%s WARN: driver error (short/over-temp) -> see DRV_STATUS\n", tag);
 }
 
 // ===========================================================================
