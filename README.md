@@ -112,7 +112,7 @@ As wired in [`src/main.cpp`](src/main.cpp) for the ESP32-C6 (matches the board w
 
 ## Build & Flash
 
-Requires [PlatformIO](https://platformio.org/) (CLI or the VS Code extension). The C6 board is **not** in the official `espressif32` platform (Arduino-ESP32 v2.x), so `platformio.ini` pins the [pioarduino](https://github.com/pioarduino/platform-espressif32) fork (Arduino-ESP32 v3.x). Dependencies (`TMCStepper`, `FastAccelStepper`, `Adafruit VL53L1X`) resolve on first build.
+Requires [PlatformIO](https://platformio.org/) (CLI or the VS Code extension). The C6 board is **not** in the official `espressif32` platform (Arduino-ESP32 v2.x), so `platformio.ini` pins the [pioarduino](https://github.com/pioarduino/platform-espressif32) fork (Arduino-ESP32 v3.x). Dependencies (`TMCStepper`, `AccelStepper`, `Adafruit VL53L1X`) resolve on first build. Motion uses **AccelStepper** (software STEP/DIR pulses on any GPIO): FastAccelStepper's hardware step generation left one leaf dead on the ESP32-C6, and AccelStepper has no peripheral-channel limits. The TMC2130s are still configured over SPI for StealthChop.
 
 The ESP32-C6 carries both a 2.4 GHz Wi-Fi radio and an 802.15.4 (Zigbee) radio. Pick a **radio profile** by choosing the build env — each sets the `RADIO_MODE` flag:
 
@@ -142,7 +142,9 @@ Key compile-time options at the top of [`src/main.cpp`](src/main.cpp):
 |---|---|---|
 | `RADIO_MODE` | per-env | `0` Wi-Fi / `1` Zigbee / `2` both — set by the PlatformIO env, not edited by hand |
 | `USE_RADAR_IN` / `USE_RADAR_OUT` | `1` / `1` | Enable each radar slot; disabling the inside radar frees UART0 for the CH340 console |
-| `TEST_TIMED_CYCLE` | `0` | `1` = ignore radars and cycle the door on timers (mechanical bring-up) |
+| `TEST_TIMED_CYCLE` | derived | `(!USE_RADAR_IN && !USE_RADAR_OUT)` — both radars off ⇒ timed open/close cycle; any radar on ⇒ radar-driven. No separate flag to forget |
+| `MOTOR_SELFTEST` | `0` | `1` = jog each leaf at boot, log commanded vs reported position (isolate a dead leaf: wiring/VM vs step generation) |
+| `SENSOR_DEBUG` | `0` | `1` = stream raw ToF + radar readings (~4 Hz, incl. `rx`/`good`/`bad` frame counts) and skip the door FSM — sensor bring-up/aiming |
 | `USE_END_STOP1` / `USE_END_STOP2` | `0` / `0` | Enable each per-leaf closed switch once wired |
 | `USE_TOF` | `0` | Enable VL53L1X — required for anti-pinch **and** pet counting |
 | `OPEN_DEG` | `180` | Door open angle in degrees |
@@ -151,7 +153,7 @@ Key compile-time options at the top of [`src/main.cpp`](src/main.cpp):
 | `CLOSE_DELAY_MS` | `3000` | Radar-clear hold before the door starts closing |
 | `TOF_DETECT_MM` | `350` | ToF distance below which an obstruction is flagged (40 mm blind-spot floor) |
 
-`TEST_TIMED_CYCLE 1` is the safe bring-up default for mechanics: it cycles the door on a timer with no radar attached, so you can validate motion, the ToF anti-pinch reverse, and current/heat before wiring the radars.
+Bring-up aids: with both radars disabled the firmware auto-selects a timed open/close cycle (no flag to set) so you can validate motion, the ToF anti-pinch reverse, and current/heat before wiring the radars. `MOTOR_SELFTEST` isolates a non-spinning leaf (note: the TMC2130 reports a valid `version` over SPI even with no 12 V motor supply — `configDriver` separately warns on charge-pump undervoltage so a missing VM isn't mistaken for a healthy driver). `SENSOR_DEBUG` streams live ToF/radar values for aiming and to confirm frame parsing.
 
 ## Safety System
 

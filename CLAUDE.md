@@ -38,6 +38,8 @@ Captures non-obvious constraints; README = human overview. Human-readable copy: 
 
 - TMC2130 **StealthChop** (`en_pwm_mode(true)`). Quiet required.
 - **StallGuard NOT used** — needs SpreadCycle, can't coexist with StealthChop. ToF does anti-pinch. Don't re-add.
+- **`version()` reads 0x11 over SPI even with NO 12V VM** (SPI on VIO 3V3). `configDriver` warns on
+  GSTAT `uv_cp` (charge-pump undervoltage) = real VM-missing signal. version OK ≠ motor will move.
 - Motion = **AccelStepper** (software STEP/DIR, any GPIO, no RMT/MCPWM/PCNT channel limits).
   Switched from FastAccelStepper during bring-up (leaf 2 / D2 not stepping on C6). `serviceMotors()`
   (`stepper.run()`) must run every loop + inside busy-waits. TMC2130 SPI config unchanged. `MOTOR_SELFTEST`
