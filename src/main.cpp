@@ -26,7 +26,7 @@
 #include <Wire.h>
 #include "Adafruit_VL53L1X.h"
 #include <TMCStepper.h>
-#include <FastAccelStepper.h>
+#include <AccelStepper.h>
 
 // ── Radio profile ──────────────────────────────────────────────────────────
 #define RADIO_WIFI    0
@@ -175,9 +175,11 @@ static inline void led(uint8_t r, uint8_t g, uint8_t b) { rgbLedWrite(PIN_LED, r
 // ===========================================================================
 TMC2130Stepper driver(PIN_M1_CS, R_SENSE);
 TMC2130Stepper driver2(PIN_M2_CS, R_SENSE);
-FastAccelStepperEngine engine   = FastAccelStepperEngine();
-FastAccelStepper      *stepper  = nullptr;
-FastAccelStepper      *stepper2 = nullptr;
+// AccelStepper drives raw STEP/DIR pulses in software (no RMT/MCPWM/PCNT channel
+// allocation), so it works on any GPIO and can't run out of step-gen channels on
+// the C6. The TMC2130s are still configured over SPI for StealthChop separately.
+AccelStepper stepper (AccelStepper::DRIVER, PIN_M1_STEP, PIN_M1_DIR);
+AccelStepper stepper2(AccelStepper::DRIVER, PIN_M2_STEP, PIN_M2_DIR);
 
 Adafruit_VL53L1X vl53 = Adafruit_VL53L1X(-1, -1);
 HardwareSerial RadarSerialIn(0);    // UART0 -> mmWave1 (inside, LD2450)
@@ -392,30 +394,31 @@ void configDriver(TMC2130Stepper &d, uint16_t rms, const char *tag) {
 // ===========================================================================
 int32_t doorTarget = 0;
 
+// Service both steppers — must be called often (every loop, and inside any
+// busy-wait) since AccelStepper generates step pulses in software.
+static inline void serviceMotors() { stepper.run(); stepper2.run(); }
+
 void doorMoveTo(int32_t pos) {
   doorTarget = pos;
-  stepper->moveTo(pos);
-  stepper2->moveTo(-pos);            // leaf 2 mirrored (back-to-back mount)
+  stepper.moveTo(pos);
+  stepper2.moveTo(-pos);             // leaf 2 mirrored (back-to-back mount)
 }
-bool doorRunning()  { return stepper->isRunning() || stepper2->isRunning(); }
-bool doorAtTarget() {
-  return stepper->getCurrentPosition()  ==  doorTarget &&
-         stepper2->getCurrentPosition() == -doorTarget;
-}
+bool doorRunning()  { return stepper.distanceToGo() != 0 || stepper2.distanceToGo() != 0; }
+bool doorAtTarget() { return stepper.distanceToGo() == 0 && stepper2.distanceToGo() == 0; }
 
 // A leaf is shut if its (enabled) switch reads closed, else by commanded pos 0.
 bool leaf1Shut() {
 #if USE_END_STOP1
   return digitalRead(PIN_END_STOP1) == END_STOP_ACTIVE;
 #else
-  return stepper->getCurrentPosition() == 0;
+  return stepper.currentPosition() == 0;
 #endif
 }
 bool leaf2Shut() {
 #if USE_END_STOP2
   return digitalRead(PIN_END_STOP2) == END_STOP_ACTIVE;
 #else
-  return stepper2->getCurrentPosition() == 0;
+  return stepper2.currentPosition() == 0;
 #endif
 }
 bool doorShut() { return leaf1Shut() && leaf2Shut(); }
@@ -439,38 +442,37 @@ bool obstructed() {
 void homeDoor() {
 #if USE_END_STOP1 || USE_END_STOP2
   Log.println("Homing to end-stop(s)...");
-  stepper->setSpeedInHz(HOME_HZ);      stepper2->setSpeedInHz(HOME_HZ);
-  stepper->setAcceleration(RUN_ACCEL); stepper2->setAcceleration(RUN_ACCEL);
+  stepper.setMaxSpeed(HOME_HZ);  stepper2.setMaxSpeed(HOME_HZ);
 
   bool done1 = true, done2 = true;
   #if USE_END_STOP1
     done1 = leaf1Shut();
-    if (!done1) stepper->runBackward();  else stepper->setCurrentPosition(0);
+    if (!done1) stepper.setSpeed(-(float)HOME_HZ);    // close = backward
+    else        stepper.setCurrentPosition(0);
   #else
-    stepper->setCurrentPosition(0);
+    stepper.setCurrentPosition(0);
   #endif
   #if USE_END_STOP2
     done2 = leaf2Shut();
-    if (!done2) stepper2->runForward(); else stepper2->setCurrentPosition(0);
+    if (!done2) stepper2.setSpeed((float)HOME_HZ);     // leaf 2 mirrored: close = forward
+    else        stepper2.setCurrentPosition(0);
   #else
-    stepper2->setCurrentPosition(0);
+    stepper2.setCurrentPosition(0);
   #endif
 
   uint32_t t0 = millis();
   while (!(done1 && done2) && millis() - t0 < HOME_TIMEOUT_MS) {
   #if USE_END_STOP1
-    if (!done1 && leaf1Shut()) { stepper->forceStopAndNewPosition(0);  done1 = true; }
+    if (!done1) { if (leaf1Shut()) { stepper.setCurrentPosition(0);  done1 = true; } else stepper.runSpeed(); }
   #endif
   #if USE_END_STOP2
-    if (!done2 && leaf2Shut()) { stepper2->forceStopAndNewPosition(0); done2 = true; }
+    if (!done2) { if (leaf2Shut()) { stepper2.setCurrentPosition(0); done2 = true; } else stepper2.runSpeed(); }
   #endif
-    delay(2);
   }
-  if (!done1) stepper->forceStopAndNewPosition(0);
-  if (!done2) stepper2->forceStopAndNewPosition(0);
+  stepper.setCurrentPosition(0); stepper2.setCurrentPosition(0);
   Log.println(done1 && done2 ? "Homed (shut)." : "Home TIMEOUT — forced pos=0.");
 #else
-  stepper->setCurrentPosition(0); stepper2->setCurrentPosition(0);
+  stepper.setCurrentPosition(0); stepper2.setCurrentPosition(0);
   Log.println("No end-stops: assume shut, pos=0.");
 #endif
 }
@@ -782,37 +784,27 @@ void setup() {
   configDriver(driver,  RMS_CURRENT,  "D1");
   configDriver(driver2, RMS_CURRENT2, "D2");
 
-  engine.init();
-  stepper  = engine.stepperConnectToPin(PIN_M1_STEP);
-  stepper2 = engine.stepperConnectToPin(PIN_M2_STEP);
-  if (!stepper || !stepper2) {
-    led(60, 0, 0); Log.println("ERROR: stepper init!"); while (1) delay(10);
-  }
-  stepper->setDirectionPin(PIN_M1_DIR);
-  stepper2->setDirectionPin(PIN_M2_DIR);
+  stepper.setMaxSpeed(RUN_HZ);  stepper.setAcceleration(RUN_ACCEL);
+  stepper2.setMaxSpeed(RUN_HZ); stepper2.setAcceleration(RUN_ACCEL);
 
 #if MOTOR_SELFTEST
   {
     const int32_t j = STEPS_PER_REV / 4;          // quarter turn each leaf
-    stepper->setSpeedInHz(RUN_HZ);  stepper->setAcceleration(RUN_ACCEL);
-    stepper2->setSpeedInHz(RUN_HZ); stepper2->setAcceleration(RUN_ACCEL);
 
     Log.println("SELFTEST: jog leaf 1 (D1 STEP=GPIO11 DIR=GPIO10)...");
-    stepper->move(j);
-    for (uint32_t t = millis(); stepper->isRunning() && millis() - t < 4000; ) delay(10);
-    Log.printf("  D1 reported pos=%ld (cmd %ld)\n",
-               (long)stepper->getCurrentPosition(), (long)j);
+    stepper.move(j);
+    for (uint32_t t = millis(); stepper.distanceToGo() != 0 && millis() - t < 4000; ) stepper.run();
+    Log.printf("  D1 reported pos=%ld (cmd %ld)\n", (long)stepper.currentPosition(), (long)j);
     delay(800);
 
     Log.println("SELFTEST: jog leaf 2 (D2 STEP=GPIO23 DIR=GPIO22)...");
-    stepper2->move(j);
-    for (uint32_t t = millis(); stepper2->isRunning() && millis() - t < 4000; ) delay(10);
-    Log.printf("  D2 reported pos=%ld (cmd %ld)\n",
-               (long)stepper2->getCurrentPosition(), (long)j);
+    stepper2.move(j);
+    for (uint32_t t = millis(); stepper2.distanceToGo() != 0 && millis() - t < 4000; ) stepper2.run();
+    Log.printf("  D2 reported pos=%ld (cmd %ld)\n", (long)stepper2.currentPosition(), (long)j);
     delay(800);
 
     Log.println("SELFTEST: pos advances + motor silent => wiring/VM/coil; "
-                "pos stuck 0 => step-gen channel for that leaf not running.");
+                "pos stuck at 0 => STEP pin not pulsing for that leaf.");
   }
 #endif
 
@@ -844,8 +836,8 @@ void setup() {
 #endif
 
   homeDoor();
-  stepper->setSpeedInHz(RUN_HZ);       stepper2->setSpeedInHz(RUN_HZ);
-  stepper->setAcceleration(RUN_ACCEL); stepper2->setAcceleration(RUN_ACCEL);
+  stepper.setMaxSpeed(RUN_HZ);         stepper2.setMaxSpeed(RUN_HZ);
+  stepper.setAcceleration(RUN_ACCEL);  stepper2.setAcceleration(RUN_ACCEL);
   setState(CLOSED);
 
   zigbeeSetup();
@@ -862,6 +854,7 @@ void setup() {
 // ===========================================================================
 void loop() {
   uint32_t now = millis();
+  serviceMotors();                     // step pulses — must run every iteration
   handleLog();
 
   radarPump(radarIn,  now);
@@ -926,10 +919,10 @@ void loop() {
         break;
       }
 #if USE_END_STOP1
-      if (leaf1Shut() && stepper->isRunning())  stepper->forceStopAndNewPosition(0);
+      if (leaf1Shut() && stepper.distanceToGo() != 0)  stepper.setCurrentPosition(0);
 #endif
 #if USE_END_STOP2
-      if (leaf2Shut() && stepper2->isRunning()) stepper2->forceStopAndNewPosition(0);
+      if (leaf2Shut() && stepper2.distanceToGo() != 0) stepper2.setCurrentPosition(0);
 #endif
       if (doorShut() || doorAtTarget()) {
         Log.println("Closed."); setState(CLOSED);

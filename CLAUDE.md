@@ -38,6 +38,10 @@ Captures non-obvious constraints; README = human overview. Human-readable copy: 
 
 - TMC2130 **StealthChop** (`en_pwm_mode(true)`). Quiet required.
 - **StallGuard NOT used** — needs SpreadCycle, can't coexist with StealthChop. ToF does anti-pinch. Don't re-add.
+- Motion = **AccelStepper** (software STEP/DIR, any GPIO, no RMT/MCPWM/PCNT channel limits).
+  Switched from FastAccelStepper during bring-up (leaf 2 / D2 not stepping on C6). `serviceMotors()`
+  (`stepper.run()`) must run every loop + inside busy-waits. TMC2130 SPI config unchanged. `MOTOR_SELFTEST`
+  jogs each leaf at boot to isolate HW vs step-gen.
 
 ## Zigbee (deploy-zigbee / debug-both only)
 
