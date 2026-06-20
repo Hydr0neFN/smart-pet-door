@@ -2,8 +2,8 @@
 //  Smart Pet Door — ESP32-C6 (DevKitM-1)
 // ---------------------------------------------------------------------------
 //  Two mmWave radars detect an animal and drive a double-leaf door:
-//    - INSIDE  radar: LD2450 on UART0 (per-target list, presence + count)
-//    - OUTSIDE radar: LD2410 on UART1 (single presence/state report)
+//    - INSIDE  radar: LD2410 on UART0 (presence/state report)
+//    - OUTSIDE radar: LD2410 on UART1 (presence/state report)
 //  A VL53L1X ToF beam in the doorway gives anti-pinch protection AND the
 //  middle "crossing" event used to count pets as they pass through.
 //
@@ -89,12 +89,12 @@
 //  Feature / behaviour configuration
 // ===========================================================================
 // ── Radars ──
-// Slot roles are fixed by the wiring: inside = LD2450, outside = LD2410.
+// Slot roles are fixed by the wiring: inside = LD2410, outside = LD2410.
 // Disable a slot if its module is not yet wired. Disabling the inside radar
 // frees UART0 so the CH340 USB console (Serial) becomes usable again.
-#define USE_RADAR_IN     1            // LD2450 inside  (UART0)
+#define USE_RADAR_IN     1            // LD2410 inside  (UART0)
 #define USE_RADAR_OUT    1            // LD2410 outside (UART1)
-#define RADAR_IN_BAUD    256000       // LD2450 factory default
+#define RADAR_IN_BAUD    256000       // LD2410 factory default
 #define RADAR_OUT_BAUD   256000       // LD2410 factory default
 #define RADAR_STALE_MS   1500         // presence ignored if no fresh frame within
 
@@ -188,7 +188,7 @@ AccelStepper stepper (AccelStepper::DRIVER, PIN_M1_STEP, PIN_M1_DIR);
 AccelStepper stepper2(AccelStepper::DRIVER, PIN_M2_STEP, PIN_M2_DIR);
 
 Adafruit_VL53L1X vl53 = Adafruit_VL53L1X(-1, -1);
-HardwareSerial RadarSerialIn(0);    // UART0 -> mmWave1 (inside, LD2450)
+HardwareSerial RadarSerialIn(0);    // UART0 -> mmWave1 (inside, LD2410)
 HardwareSerial RadarSerialOut(1);   // UART1 -> mmWave2 (outside, LD2410)
 
 // ===========================================================================
@@ -311,7 +311,7 @@ struct Radar {
   uint8_t  moveEnergy = 0, stillEnergy = 0;       // LD2410 energies
 };
 
-Radar radarIn  = {};   // inside  (LD2450)
+Radar radarIn  = {};   // inside  (LD2410)
 Radar radarOut = {};   // outside (LD2410)
 
 static const uint8_t LD2450_HDR[4] = {0xAA, 0xFF, 0x03, 0x00};
@@ -899,7 +899,7 @@ void setup() {
 #endif
 
   // Radars
-  radarIn.ser  = &RadarSerialIn;  radarIn.name  = "IN";  radarIn.type  = RADAR_LD2450;
+  radarIn.ser  = &RadarSerialIn;  radarIn.name  = "IN";  radarIn.type  = RADAR_LD2410;
   radarOut.ser = &RadarSerialOut; radarOut.name = "OUT"; radarOut.type = RADAR_LD2410;
 #if USE_RADAR_IN
   RadarSerialIn.begin(RADAR_IN_BAUD,   SERIAL_8N1, PIN_R1_RX, PIN_R1_TX);
@@ -949,9 +949,10 @@ void loop() {
   #else
       Log.printf("ToF off | ");
   #endif
-      Log.printf("IN/LD2450 fresh=%d tgts=%u x=%d y=%d v=%dcm/s rx=%lu g=%lu b=%lu | ",
-                 radarPresent(radarIn, now), radarIn.targets,
-                 radarIn.dx, radarIn.dy, radarIn.dspeed,
+      Log.printf("IN/LD2410 fresh=%d st=%u mov=%ucm(e%u) sta=%ucm(e%u) rx=%lu g=%lu b=%lu | ",
+                 radarPresent(radarIn, now), radarIn.state,
+                 radarIn.moveDist, radarIn.moveEnergy,
+                 radarIn.stillDist, radarIn.stillEnergy,
                  radarIn.rxBytes, radarIn.good, radarIn.bad);
       Log.printf("OUT/LD2410 fresh=%d st=%u mov=%ucm(e%u) sta=%ucm(e%u) rx=%lu g=%lu b=%lu\n",
                  radarPresent(radarOut, now), radarOut.state,
