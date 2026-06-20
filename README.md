@@ -28,12 +28,12 @@ Built on an **ESP32-C6** with dual mmWave radar presence detection, a Time-of-Fl
 
 A pair of **24 GHz mmWave radars** watch each side of the threshold:
 
-- **Inside — LD2450** (UART0): multi-target list, presence + active-target count.
-- **Outside — LD2410** (UART1): single presence/state report.
+- **Inside — LD2410** (UART0): presence/state report.
+- **Outside — LD2410** (UART1): presence/state report.
 
 When a radar detects a target approaching (and the current access mode permits that direction), the controller swings the door open. Once the field is clear for a hold delay, the door closes. A **VL53L1X ToF sensor** at the gate is an invisible safety curtain — any obstruction during closing reverses the door (anti-pinch) — and doubles as the mid-gate "crossing" event used to count pets.
 
-> The design called for two LD2450s, but one arrived dead, so the build pairs one LD2450 with one LD2410. The firmware now decodes **both** UART protocols (LD2450 `AA FF 03 00 … 55 CC`; LD2410 `F4 F3 F2 F1 | len | … | F8 F7 F6 F5`), selected per radar slot.
+> Both slots run **LD2410**. The firmware keeps a parser for both UART protocols (LD2450 `AA FF 03 00 … 55 CC`; LD2410 `F4 F3 F2 F1 | len | … | F8 F7 F6 F5`) and selects per slot, so a multi-target **LD2450 can be dropped into the inside slot later** with a one-line type change.
 
 The door runs a four-state machine:
 
@@ -57,7 +57,7 @@ A pass is counted only when the full sequence is observed within timeouts: one s
 ## Features
 
 - **Silent actuation** — TMC2130 StealthChop eliminates the audible whine of A4988/DRV8825-class drivers.
-- **Dual-protocol radar** — LD2450 (multi-target/direction-capable) inside, LD2410 (presence) outside, each with its own frame parser and a staleness guard.
+- **Dual presence radar** — an **LD2410** on each side (inside + outside), each parsed with a staleness guard. Firmware retains an LD2450 parser too, so a multi-target LD2450 can be slotted into the inside channel without code changes.
 - **Pre-emptive anti-pinch** — ToF curtain halts and reverses the door *before* contact, not after.
 - **Secure at rest** — backdrivable drivetrain held closed by motor torque; resists being shoved open.
 - **Per-leaf end-stops** — two independent switches (`END_STOP1`/`END_STOP2`), each separately enable-able, used for homing and as the closed ground-truth.
@@ -71,7 +71,7 @@ A pass is counted only when the full sequence is observed within timeouts: one s
 | MCU | **ESP32-C6** DevKitM-1 | RISC-V, Wi-Fi 6, BLE 5, 802.15.4 (Zigbee/Thread), Matter-ready |
 | Motor driver | **TMC2130** ×2 | StealthChop (silent), SPI config, 1/16 µstep |
 | Motor | **NEMA 17** ×2 | 1.8°/step, 0.3–0.6 Nm, direct hinge drive, back-to-back mount |
-| Presence | **LD2450** ×1 + **LD2410** ×1 | 24 GHz FMCW, UART @256000, ~5 m, one per side. LD2410 substituted after an LD2450 arrived dead |
+| Presence | **LD2410** ×2 | 24 GHz FMCW, UART @256000, ~5 m, one per side (inside + outside). Firmware also parses LD2450 if one is fitted |
 | Safety | **VL53L1X** ToF ×1 | I²C, 940 nm (no radar interference), downward gate mount |
 | Power | 12 V SMPS → **LM2596** buck → 5 V | 12 V to drivers, 5 V to MCU + sensors; 1000 µF back-EMF caps per driver |
 | Panel | Steel-faced **20 mm PIR foam** + rubber gasket | R ≈ 0.87 m²·K/W; overlapping bi-parting panels with perimeter seal |
@@ -90,11 +90,11 @@ As wired in [`src/main.cpp`](src/main.cpp) for the ESP32-C6 (matches the board w
 | Driver 2 STEP / DIR / CS | 23 / 22 / 3 | SPI/step | Motor driver 2 (leaf 2) |
 | End-stop 1 / End-stop 2 | 13 / 2 | — | Per-leaf closed switch (`USE_END_STOP1/2`) |
 | ToF SDA / SCL / INT | 6 / 7 / 0 | I²C | VL53L1X |
-| Radar 1 inside (RX / TX) | 17 / 16 | UART0 | LD2450 |
+| Radar 1 inside (RX / TX) | 17 / 16 | UART0 | LD2410 |
 | Radar 2 outside (RX / TX) | 4 / 5 | UART1 | LD2410 |
 | Status NeoPixel | 8 | — | Onboard WS2812 |
 
-> **Console caveat:** the inside radar (LD2450) sits on **UART0 (GPIO16/17)** — the same pins as the CH340 USB-serial console — and the native USB-Serial-JTAG pins (GPIO12/13) are reused for MISO / END_STOP1. So once the inside radar is wired, the CH340 console is unavailable and **Wi-Fi telnet is the live log path**. The CH340 console is only usable when the inside radar is disabled (`USE_RADAR_IN 0`). The status NeoPixel encodes the current stage as a fallback when no log is attached.
+> **Console caveat:** the inside radar (LD2410) sits on **UART0 (GPIO16/17)** — the same pins as the CH340 USB-serial console — and the native USB-Serial-JTAG pins (GPIO12/13) are reused for MISO / END_STOP1. So once the inside radar is wired, the CH340 console is unavailable and **Wi-Fi telnet is the live log path**. The CH340 console is only usable when the inside radar is disabled (`USE_RADAR_IN 0`). The status NeoPixel encodes the current stage as a fallback when no log is attached.
 
 ## Repository Layout
 
@@ -200,7 +200,7 @@ Matter-over-Thread is the production upgrade path on the same ESP32-C6 hardware 
 - [x] Zigbee join + Door Lock, Occupancy Sensing, and Analog (count) clusters
 - [x] Occupancy counting (+1 in / −1 out, floored at 0) via radar → ToF → radar
 - [x] Per-leaf closed-position end-stop switches for homing ground-truth
-- [ ] Direction-of-travel inference from LD2450 target coordinates (refine count accuracy)
+- [ ] Optional LD2450 on the inside slot for target-coordinate direction inference (refine count accuracy)
 - [ ] OTA support (needs a larger flash or a slimmer Zigbee image to restore dual app slots)
 - [ ] Matter-over-Thread migration
 

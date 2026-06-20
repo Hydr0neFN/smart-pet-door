@@ -28,7 +28,8 @@ Captures non-obvious constraints; README = human overview. Human-readable copy: 
 
 ## Radars
 
-- Inside = **LD2450** (UART0), outside = **LD2410** (UART1). Both **256000** baud.
+- Both sides = **LD2410** (inside UART0, outside UART1), **256000** baud. LD2450 parser kept in
+  tree — set `radarIn.type = RADAR_LD2450` to use one on the inside slot.
 - Two frame formats, both parsed in `main.cpp`:
   - LD2450: `AA FF 03 00 | 3×8-byte targets | 55 CC` (30 B). Count non-zero target slots.
   - LD2410: `F4 F3 F2 F1 | len(LE) | payload | F8 F7 F6 F5`; presence = payload target-state byte ≠ 0.
