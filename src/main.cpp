@@ -111,7 +111,7 @@
 #define MOTOR_SELFTEST 0
 // 1 = stream raw ToF + radar readings (~4 Hz) and SKIP the door FSM. Sensor
 // bring-up / aiming. Enable the sensors you want to watch (USE_TOF / USE_RADAR_*).
-#define SENSOR_DEBUG 0
+#define SENSOR_DEBUG 1
 
 // ── End-stop switches ──
 // Set to 1 once the corresponding leaf switch is wired.
