@@ -1,5 +1,8 @@
 # Smart Pet Door 🐾
 
+<img width="1917" height="1078" alt="image" src="https://github.com/user-attachments/assets/cc415e5f-6828-416f-af6a-ca0d08f0b3f9" />
+
+
 A thermally insulated, electronically actuated pet door that opens only on confirmed animal detection — replacing the permanent thermal bridge of a passive flap with a fully sealed, motor-driven door.
 
 > Conventional flap doors leave a permanent gap in the building envelope and can raise HVAC demand by 6%+ annually. This door seals the opening completely when idle and opens only when a pet actually approaches, then closes and re-seals behind them.
