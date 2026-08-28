@@ -1,3 +1,5 @@
+**English** · [繁體中文](README.zh-TW.md)
+
 # Smart Pet Door 🐾
 
 <img width="1917" height="1078" alt="image" src="https://github.com/user-attachments/assets/cc415e5f-6828-416f-af6a-ca0d08f0b3f9" />
