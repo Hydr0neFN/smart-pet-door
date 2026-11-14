@@ -26,7 +26,7 @@ Zigbee 版本用單一應用程式、**沒有 OTA** 的分割表（`partitions_z
 
 ## 進出模式
 
-雷達對判定的移動方向會強制執行四種進出模式，四種都能遠端設定。
+雷達判斷出移動方向後，依四種進出模式決定放行或擋下，四種都能遠端設定。
 
 | 方向 \ 模式 | UNLOCKED（解鎖） | IN-ONLY（僅進） | OUT-ONLY（僅出） | LOCKED（上鎖） |
 |---|:---:|:---:|:---:|:---:|
@@ -47,7 +47,7 @@ Zigbee 介面（`deploy-zigbee` / `debug-both` 版本才有）有四個端點：
 ## Zigbee 實作筆記（為什麼這樣做）
 
 - **esp-zigbee-sdk 跟著框架走，沒有另外加相依。** Arduino-ESP32 v3.x（pioarduino 分支）*內建* Espressif 的 [esp-zigbee-sdk](https://github.com/espressif/esp-zigbee-sdk)：`esp_zb_*` API 和預先編譯好的 zboss 函式庫。`#include <Zigbee.h>` 只是上面一層輕量 Arduino 包裝。自訂的門鎖端點直接呼叫 SDK（`esp_zb_door_lock_clusters_create` 等），`ZIGBEE_MODE_ED` 建置旗標讓框架連結 zboss。`lib_deps` 不用加東西，因為另外加一份 SDK 會跟內建的那份衝突。
-- **模式用 Multistate 而不是廠商屬性。** 標準 ZCL Door Lock 只有二元狀態（LockState Locked/Unlocked），沒有地方放有方向的 IN-ONLY/OUT-ONLY。最早是把四種模式塞在 Door Lock cluster 的*廠商專屬屬性*裡，但一般閘道器沒有自訂轉換器／quirk 就看不到。換成**標準 Multistate Output** 後，閘道器原生就顯示成四個選項，開箱就能控制。Door Lock cluster 只負責安全／上鎖的廣告和狀態。
+- **模式用 Multistate 而不是廠商屬性。** 標準 ZCL Door Lock 只有二元狀態（LockState Locked/Unlocked），沒有地方放有方向的 IN-ONLY/OUT-ONLY。最早是把四種模式塞在 Door Lock cluster 的*廠商專屬屬性*裡，但一般閘道器沒有自訂轉換器／quirk 就看不到。換成**標準 Multistate Output** 後，閘道器原生就顯示成四個選項，開箱就能控制。Door Lock cluster 只負責對外報告安全／上鎖的狀態。
 - **Door Lock 端點自己寫，其他都用現成的。** Arduino 包裝有 Multistate、Occupancy、Analog 的類別（都直接用），但**沒有 Door Lock**，所以 `ZigbeePetDoorLock` 是自己在 cluster `0x0101` 上手寫的 `ZigbeeEP` 子類別。
 - **非 Zigbee 環境用 `lib_ignore = Zigbee`。** 內建的 Zigbee 函式庫不管怎樣都會編譯，但 zboss 只有在有 `ZIGBEE_MODE_ED` 時才會連結；少了它會在連結階段失敗（`undefined reference to esp_zb_ep_list_create`）。在 `debug-wifi` 忽略這個函式庫就不會發生。
 - **沒有 OTA 的分割表。** 4 MB flash 上，zboss 映像（約 1.39 MB）塞不進原廠雙 OTA `zigbee.csv` 的應用程式分割槽（各 1.31 MB）。`partitions_zigbee.csv` 拿 OTA 換一個 2.5 MB 的分割槽。
